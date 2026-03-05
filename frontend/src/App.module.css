@@ -1,0 +1,38 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Row 1: Camera (wide) + HeadCount (narrow) */
+.row1 {
+  display: grid;
+  grid-template-columns: 1fr 288px;
+  gap: 14px;
+  height: 430px;
+  flex-shrink: 0;
+}
+
+/* Row 2: SystemLog (wide) + RecognizedFaces (narrow) */
+.row2 {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 14px;
+  flex-shrink: 0;
+}

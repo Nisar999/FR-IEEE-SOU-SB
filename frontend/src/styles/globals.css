@@ -1,0 +1,70 @@
+/* ─── Global CSS Variables & Reset ─── */
+
+:root {
+  --bg: #f0f4f8;
+  --bg2: #e6ecf3;
+  --panel: #ffffff;
+  --panel2: #f7f9fc;
+  --border: #dde4ed;
+  --border2: #c8d4e0;
+  --accent: #1a6ef5;
+  --accent-soft: #e8f0fe;
+  --green: #16a34a;
+  --green-soft: #dcfce7;
+  --orange: #ea580c;
+  --orange-soft: #fff1e6;
+  --red: #dc2626;
+  --red-soft: #fee2e2;
+  --text: #0f1c2e;
+  --text2: #4a6080;
+  --text3: #8fa3ba;
+  --shadow: 0 1px 4px rgba(0, 0, 0, 0.06), 0 4px 16px rgba(0, 0, 0, 0.06);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08);
+  --font: 'DM Sans', sans-serif;
+  --mono: 'JetBrains Mono', monospace;
+  --radius: 12px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  cursor: pointer;
+  font-family: var(--font);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border2);
+  border-radius: 2px;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}

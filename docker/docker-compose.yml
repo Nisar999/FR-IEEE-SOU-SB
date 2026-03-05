@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:latest
+    container_name: mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    restart: unless-stopped
+
+  face-recognition-service:
+    build:
+      context: ../backend
+      dockerfile: ../docker/Dockerfile
+    container_name: face-recognition-service
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017/
+    depends_on:
+      - mongodb
+    volumes:
+      - ../backend/embeddings:/app/embeddings
+      - ../backend/config:/app/config
+    restart: unless-stopped
+
+volumes:
+  mongo_data:
