@@ -6,7 +6,7 @@ from insightface.app import FaceAnalysis
 
 class RecognitionEngine:
     def __init__(self,
-                 embeddings_path=r"./embeddings/embeddings_averaged.pkl",
+                 embeddings_path=r"./embeddings/embeddings.pkl",
                  similarity_threshold=0.5):
         self.embeddings_path = embeddings_path
         self.similarity_threshold = similarity_threshold
@@ -17,7 +17,7 @@ class RecognitionEngine:
         # Initialize InsightFace (CPU)
         self.app = FaceAnalysis(
             name="buffalo_l",
-            providers=['CPUExecutionProvider']
+            providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
         )
 
         self.app.prepare(ctx_id=0, det_size=(320, 320))
@@ -49,6 +49,10 @@ class RecognitionEngine:
                     self.known_embeddings[name] = []
 
                 self.known_embeddings[name].append(emb)
+
+            # Convert lists of embeddings to 2D numpy arrays
+            for name in self.known_embeddings:
+                self.known_embeddings[name] = np.vstack(self.known_embeddings[name])
 
         # CASE 2 — averaged embeddings format
         elif isinstance(data, dict):

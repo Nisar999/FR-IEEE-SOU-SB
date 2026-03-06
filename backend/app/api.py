@@ -1,17 +1,20 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from datetime import datetime
+
 from .database import (
-    attendance_col, 
-    camera_status_col, 
-    unknown_col, 
+    attendance_col,
+    camera_status_col,
+    unknown_col,
     persons_col,
     get_all_unknowns,
     get_person_history
 )
+
 from .camera_manager import CameraManager
 
 api_router = APIRouter()
+
 camera_manager = CameraManager()
 
 @api_router.get("/health")
@@ -20,38 +23,52 @@ def read_health():
 
 @api_router.get("/live-headcount")
 def get_live_headcount():
-    # Active meaning exit_time is None
-    active_records = list(attendance_col.find({"status": "active"}))
-    known = 0
-    unknown = 0
-    
-    for r in active_records:
-        if r.get("is_unknown", False):
-            unknown += 1
+    # Use real-time lifecycle registry instead of database
+    registry = camera_manager.lifecycle_engine.active_registry
+
+    unique_knowns = set()
+    unique_unknowns = set()
+
+    for data in registry.values():
+        if data.get("is_unknown", False):
+            unique_unknowns.add(data["identity"])
         else:
-            known += 1
-            
+            unique_knowns.add(data["identity"])
+
     return {
-        "known_persons": known,
-        "unknown_persons": unknown,
-        "total_persons": known + unknown
+        "known_persons": len(unique_knowns),
+        "unknown_persons": len(unique_unknowns),
+        "total_persons": len(unique_knowns) + len(unique_unknowns)
     }
 
 @api_router.get("/active-persons")
 def get_active_persons():
-    # Return basic details of currently active persons
-    active = list(attendance_col.find({"status": "active"}, {"_id": 0}))
-    return active
+    registry = camera_manager.lifecycle_engine.active_registry
+
+    persons = []
+
+    for track_id, data in registry.items():
+        persons.append({
+            "track_id": track_id,
+            "identity": data["identity"],
+            "is_unknown": data["is_unknown"],
+            "last_seen": data["last_seen"]
+        })
+
+    return persons
 
 @api_router.get("/today-attendance")
 def get_today_attendance():
     now = datetime.utcnow()
     start_of_day = datetime(now.year, now.month, now.day)
-    
-    records = list(attendance_col.find({
-        "entry_time": {"$gte": start_of_day}
-    }, {"_id": 0}).sort("entry_time", -1))
-    
+
+    records = list(
+        attendance_col.find(
+            {"entry_time": {"$gte": start_of_day}},
+            {"_id": 0}
+        ).sort("entry_time", -1)
+    )
+
     return records
 
 @api_router.get("/person-history/{name}")
@@ -68,40 +85,49 @@ class PromoteRequest(BaseModel):
 
 @api_router.post("/promote-unknown")
 def promote_unknown(req: PromoteRequest):
-    unknown_record = unknown_col.find_one({"unknown_id": req.unknown_id, "promoted": False})
+    unknown_record = unknown_col.find_one({
+        "unknown_id": req.unknown_id,
+        "promoted": False
+    })
+
     if not unknown_record:
-        raise HTTPException(status_code=404, detail="Unknown identity not found or already promoted.")
-        
-    # Promote Logic
-    # 1. Save to persons
+        raise HTTPException(
+            status_code=404,
+            detail="Unknown identity not found or already promoted."
+        )
+
     try:
         persons_col.insert_one({
             "name": req.known_name,
             "embedding": unknown_record["embedding"],
             "created_at": datetime.utcnow()
         })
-    except Exception as e:
-        # Duplicate name
-        pass # Handle merge if needed
+    except Exception:
+        pass
 
-    # 2. Update unknown archive
     unknown_col.update_one(
         {"unknown_id": req.unknown_id},
-        {"$set": {"promoted": True, "promoted_to": req.known_name}}
+        {"$set": {
+            "promoted": True,
+            "promoted_to": req.known_name
+        }}
     )
-    
-    # 3. Update attendance logs historical
+
     attendance_col.update_many(
         {"person_name": req.unknown_id},
-        {"$set": {"person_name": req.known_name, "is_unknown": False}}
+        {"$set": {
+            "person_name": req.known_name,
+            "is_unknown": False
+        }}
     )
 
-    # 4. Trigger engine re-load of embeddings
-    # Note: Requires IPC or shared state, simplest is to just call engine.load_embeddings()
-    # since these run in same process in this simple setup.
+    # Reload embeddings after promotion
     camera_manager.recognition_engine.load_embeddings()
 
-    return {"status": "success", "message": f"{req.unknown_id} promoted to {req.known_name}"}
+    return {
+        "status": "success",
+        "message": f"{req.unknown_id} promoted to {req.known_name}"
+    }
 
 @api_router.get("/camera-status")
 def get_camera_status():
