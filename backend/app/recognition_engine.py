@@ -7,20 +7,21 @@ from insightface.app import FaceAnalysis
 class RecognitionEngine:
     def __init__(self,
                  embeddings_path=r"./embeddings/embeddings.pkl",
-                 similarity_threshold=0.5):
+                 similarity_threshold=0.45):
         self.embeddings_path = embeddings_path
         self.similarity_threshold = similarity_threshold
         self.known_embeddings = {}
 
         self.load_embeddings()
 
-        # Initialize InsightFace (CPU)
+        # Initialize InsightFace (CPU fallback to prevent CUDA init hangs)
         self.app = FaceAnalysis(
             name="buffalo_l",
-            providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
+            providers=['CPUExecutionProvider']
         )
 
-        self.app.prepare(ctx_id=0, det_size=(320, 320))
+        # ctx_id=-1 explicitly forces CPU context, preventing GPU hangs
+        self.app.prepare(ctx_id=-1, det_size=(320, 320))
 
         logging.info("InsightFace FaceAnalysis initialized (CPU).")
 

@@ -1,13 +1,16 @@
 import os
 from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure, OperationFailure
 from datetime import datetime
 import logging
 import uuid
+import time
 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
 DB_NAME = "face_recognition"
 
-client = MongoClient(MONGO_URI)
+# Add serverSelectionTimeoutMS for faster failure detection and retries
+client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
 db = client[DB_NAME]
 
 # Collections
@@ -16,16 +19,57 @@ attendance_col = db["attendance_logs"]
 unknown_col = db["unknown_archive"]
 camera_status_col = db["camera_status"]
 
-def init_db():
-    # Setup indexes
-    persons_col.create_index("name", unique=True)
-    attendance_col.create_index([("person_name", 1), ("status", 1)])
-    unknown_col.create_index("unknown_id", unique=True)
-    
-    logging.info("Database initialized with indexes.")
+def _retry_mongo(func, retries=3, delay=1):
+    def wrapper(*args, **kwargs):
+        for i in range(retries):
+            try:
+                return func(*args, **kwargs)
+            except (ConnectionFailure, OperationFailure) as e:
+                logging.warning(f"MongoDB operation failed, retrying {i+1}/{retries}: {e}")
+                time.sleep(delay)
+        logging.error("MongoDB operation failed after max retries")
+        return None
+    return wrapper
 
+def init_db():
+    try:
+        persons_col.create_index("name", unique=True)
+        attendance_col.create_index([("person_name", 1), ("status", 1)])
+        unknown_col.create_index("unknown_id", unique=True)
+        logging.info("Database initialized with indexes.")
+    except Exception as e:
+        logging.error(f"MongoDB indexing failed: {e}")
+
+@_retry_mongo
 def create_attendance_record(name: str, camera_id: str, is_unknown: bool, confidence: float):
     now = datetime.utcnow()
+    start_of_day = datetime(now.year, now.month, now.day)
+    
+    # Check if a record for this person already exists today
+    existing = attendance_col.find_one({
+        "person_name": name,
+        "entry_time": {"$gte": start_of_day}
+    })
+    
+    if existing:
+        attendance_col.update_one(
+            {"_id": existing["_id"]},
+            {
+                "$set": {
+                    "last_seen": now,
+                    "status": "active",
+                    "camera_id": camera_id # update to latest camera seen on
+                },
+                "$inc": {
+                    "visit_count": 1,
+                    "confidence_sum": confidence,
+                    "readings_count": 1
+                }
+            }
+        )
+        return existing["_id"]
+
+    # If no existing record today, create a new one
     record = {
         "person_name": name,
         "camera_id": camera_id,
@@ -33,7 +77,7 @@ def create_attendance_record(name: str, camera_id: str, is_unknown: bool, confid
         "last_seen": now,
         "exit_time": None,
         "duration_seconds": 0,
-        "visit_count": 1, # Increment logic handles elsewhere if needed
+        "visit_count": 1, 
         "avg_confidence": confidence,
         "confidence_sum": confidence,
         "readings_count": 1,
@@ -44,10 +88,9 @@ def create_attendance_record(name: str, camera_id: str, is_unknown: bool, confid
     res = attendance_col.insert_one(record)
     return res.inserted_id
 
+@_retry_mongo
 def update_attendance_record(record_id, new_confidence: float):
     now = datetime.utcnow()
-    # Find to calculate moving average locally or use inc
-    
     attendance_col.update_one(
         {"_id": record_id},
         {
@@ -59,9 +102,9 @@ def update_attendance_record(record_id, new_confidence: float):
         }
     )
 
+@_retry_mongo
 def close_attendance_record(record_id):
     now = datetime.utcnow()
-    
     record = attendance_col.find_one({"_id": record_id})
     if record:
         entry_time = record.get("entry_time", now)
@@ -81,6 +124,7 @@ def close_attendance_record(record_id):
             }
         )
 
+@_retry_mongo
 def update_camera_status(camera_id: str, status: str, error_msg: str = ""):
     camera_status_col.update_one(
         {"camera_id": camera_id},
@@ -94,14 +138,11 @@ def update_camera_status(camera_id: str, status: str, error_msg: str = ""):
         upsert=True
     )
     
-
+@_retry_mongo
 def save_unknown_identity(identity, embedding, first_seen, confidence):
-
-    # Ensure unknown_id always exists
     if identity is None or identity == "":
         identity = f"unknown_{uuid.uuid4().hex[:8]}"
 
-    # Convert numpy embedding → list for MongoDB
     if hasattr(embedding, "tolist"):
         embedding = embedding.tolist()
 
@@ -112,18 +153,18 @@ def save_unknown_identity(identity, embedding, first_seen, confidence):
         "confidence": float(confidence)
     }
 
-    # Avoid duplicate insert crash
     unknown_col.update_one(
         {"unknown_id": identity},
         {"$setOnInsert": doc},
         upsert=True
     )
 
-
-
-
+@_retry_mongo
 def get_all_unknowns():
-    return list(unknown_col.find({"promoted": False}, {"_id": 0}))
+    docs = unknown_col.find({"promoted": {"$ne": True}}, {"_id": 0})
+    return list(docs) if docs else []
 
+@_retry_mongo
 def get_person_history(name: str):
-    return list(attendance_col.find({"person_name": name}, {"_id": 0}).sort("entry_time", -1))
+    docs = attendance_col.find({"person_name": name}, {"_id": 0}).sort("entry_time", -1)
+    return list(docs) if docs else []

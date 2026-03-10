@@ -1,4 +1,5 @@
 import time
+import threading
 from datetime import datetime
 import uuid
 import logging
@@ -16,6 +17,9 @@ class LifecycleEngine:
         self.exit_threshold_seconds = exit_threshold_seconds
         self.unknown_expiry_minutes = unknown_expiry_minutes
 
+        # Thread-safety lock for registries
+        self.registry_lock = threading.RLock()
+
         # track_id → lifecycle info
         self.active_registry = {}
 
@@ -25,90 +29,101 @@ class LifecycleEngine:
     def process_tracker_results(self, camera_id, tracked_faces):
         now = time.time()
 
-        # -------- HANDLE EXITS --------
-        to_remove = []
+        with self.registry_lock:
+            # -------- HANDLE EXITS --------
+            to_remove = []
 
-        for track_id, data in self.active_registry.items():
-            if now - data["last_seen"] > self.exit_threshold_seconds:
-                close_attendance_record(data["record_id"])
-                logging.info(f"EXIT registered for {data['identity']}")
-                to_remove.append(track_id)
+            for track_id, data in self.active_registry.items():
+                if now - data["last_seen"] > self.exit_threshold_seconds:
+                    close_attendance_record(data["record_id"])
+                    logging.info(f"EXIT registered for {data['identity']}")
+                    to_remove.append(track_id)
 
-        for tid in to_remove:
-            del self.active_registry[tid]
+            for tid in to_remove:
+                del self.active_registry[tid]
 
-        # -------- HANDLE TRACK INPUT --------
-        for face in tracked_faces:
-            local_track_id = face["track_id"]
-            global_track_id = f"{camera_id}_{local_track_id}"
+            # -------- PRE-PROCESS TRACKED FACES TO PREVENT DUPLICATE IDENTITIES --------
+            # If tracking assigns the same identity to two different boxes, keep the one with highest confidence
+            unique_faces = {}
+            for face in tracked_faces:
+                identity = face["identity"]
+                if identity not in unique_faces or unique_faces[identity]["confidence"] < face["confidence"]:
+                    unique_faces[identity] = face
             
-            identity = face["identity"]
-            confidence = face["confidence"]
-            embedding = face.get("embedding")
-            is_unknown = face.get("is_unknown", False)
+            deduplicated_faces = list(unique_faces.values())
 
-            # Normalize embedding type
-            if embedding is not None and hasattr(embedding, "tolist"):
-                embedding = embedding.tolist()
+            # -------- HANDLE TRACK INPUT --------
+            for face in deduplicated_faces:
+                local_track_id = face["track_id"]
+                global_track_id = f"{camera_id}_{local_track_id}"
+                
+                identity = face["identity"]
+                confidence = face["confidence"]
+                embedding = face.get("embedding")
+                is_unknown = face.get("is_unknown", False)
 
-            # Handle unknown clustering
-            if is_unknown and embedding is not None:
-                identity = self._handle_unknown(embedding, confidence)
+                # Normalize embedding type
+                if embedding is not None and hasattr(embedding, "tolist"):
+                    embedding = embedding.tolist()
 
-            # -------- UPDATE EXISTING TRACK --------
-            if global_track_id in self.active_registry:
-                self.active_registry[global_track_id]["last_seen"] = now
-                record_id = self.active_registry[global_track_id]["record_id"]
+                # Handle unknown clustering
+                if is_unknown and embedding is not None:
+                    identity = self._handle_unknown(embedding, confidence)
 
-                update_attendance_record(record_id, confidence)
+                # -------- UPDATE EXISTING TRACK BY GLOBAL_TRACK_ID --------
+                if global_track_id in self.active_registry:
+                    self.active_registry[global_track_id]["last_seen"] = now
+                    record_id = self.active_registry[global_track_id]["record_id"]
 
-                # identity upgrade (unknown → known)
-                if not is_unknown and self.active_registry[global_track_id]["is_unknown"]:
-                    self.active_registry[global_track_id]["identity"] = identity
-                    self.active_registry[global_track_id]["is_unknown"] = False
-
-            # -------- NEW ENTRY OR MERGE --------
-            else:
-                # Check if this identity is already active
-                existing_global_id = None
-                for gid, data in self.active_registry.items():
-                    if data["identity"] == identity:
-                        existing_global_id = gid
-                        break
-
-                if existing_global_id:
-                    # Merge with existing active record
-                    record_id = self.active_registry[existing_global_id]["record_id"]
-                    
                     update_attendance_record(record_id, confidence)
 
-                    self.active_registry[global_track_id] = {
-                        "identity": identity,
-                        "record_id": record_id,
-                        "last_seen": now,
-                        "is_unknown": is_unknown
-                    }
-                    
-                    # Remove the old stalled track to prevent duplicate headcounts
-                    del self.active_registry[existing_global_id]
-                    
-                    logging.info(f"MERGED new track for active identity {identity}")
+                    # identity upgrade (unknown → known)
+                    if not is_unknown and self.active_registry[global_track_id]["is_unknown"]:
+                        self.active_registry[global_track_id]["identity"] = identity
+                        self.active_registry[global_track_id]["is_unknown"] = False
+
+                # -------- NEW ENTRY OR MERGE INTO ANOTHER ACTIVE IDENTITY --------
                 else:
-                    record_id = create_attendance_record(
-                        identity,
-                        camera_id,
-                        is_unknown,
-                        confidence
-                    )
+                    # Check if this identity is already active under a different global_track_id
+                    existing_global_id = None
+                    for gid, data in list(self.active_registry.items()):
+                        if data["identity"] == identity:
+                            existing_global_id = gid
+                            break
 
-                    self.active_registry[global_track_id] = {
-                        "identity": identity,
-                        "record_id": record_id,
-                        "last_seen": now,
-                        "is_unknown": is_unknown
-                    }
+                    if existing_global_id:
+                        # Merge with existing active record
+                        record_id = self.active_registry[existing_global_id]["record_id"]
+                        
+                        update_attendance_record(record_id, confidence)
 
-                    logging.info(f"ENTRY registered for {identity}")
+                        self.active_registry[global_track_id] = {
+                            "identity": identity,
+                            "record_id": record_id,
+                            "last_seen": now,
+                            "is_unknown": is_unknown
+                        }
+                        
+                        # Remove the old stalled track to prevent duplicate headcounts
+                        del self.active_registry[existing_global_id]
+                        
+                        logging.info(f"MERGED new track for active identity {identity}")
+                    else:
+                        record_id = create_attendance_record(
+                            identity,
+                            camera_id,
+                            is_unknown,
+                            confidence
+                        )
+
+                        self.active_registry[global_track_id] = {
+                            "identity": identity,
+                            "record_id": record_id,
+                            "last_seen": now,
+                            "is_unknown": is_unknown
+                        }
+
+                        logging.info(f"ENTRY registered for {identity}")
 
     def _cosine_similarity(self, v1, v2):
         v1 = np.array(v1)
@@ -137,8 +152,16 @@ class LifecycleEngine:
                 best_match = uid
 
         # reuse existing unknown if similar
-        if best_sim > 0.4:
+        if best_sim > 0.35:
             self.unknown_registry[best_match]["last_seen"] = now
+            
+            # Smooth embedding to adapt to different angles
+            old_emb = np.array(self.unknown_registry[best_match]["embedding"])
+            new_emb = np.array(embedding)
+            smoothed = (old_emb * 0.8) + (new_emb * 0.2)
+            smoothed = smoothed / np.linalg.norm(smoothed) # Renormalize
+            self.unknown_registry[best_match]["embedding"] = smoothed.tolist()
+            
             return best_match
 
         # create new unknown
@@ -158,3 +181,4 @@ class LifecycleEngine:
         )
 
         return new_id
+

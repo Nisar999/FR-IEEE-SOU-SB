@@ -1,2 +1,3 @@
-cam_01: 0
-# cam_02: rtsp://192.168.1.11:554/stream
+cam_01: "rtsp://admin:Ieee%401234@192.168.0.5:554/unicast/c1/s0/live"
+# cam_02: 0
+# cam_03: "rtsp://admin:Ieee%401234@192.168.0.5:554/unicast/c1/s0/live"

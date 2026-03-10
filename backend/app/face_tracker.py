@@ -1,10 +1,13 @@
 import time
 import math
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 class FaceTracker:
-    def __init__(self, track_distance_threshold=80.0, track_expiry_seconds=3.0, embedding_threshold=0.70):
+    def __init__(self, track_distance_threshold=120.0, track_expiry_seconds=5.0, embedding_threshold=0.60):
+        # Increased distance threshold to accommodate fast movement
         self.track_distance_threshold = track_distance_threshold
+        # Decreased expiry heavily to prevent zombie tracks lingering after target moves quickly
         self.track_expiry_seconds = track_expiry_seconds
         self.embedding_threshold = embedding_threshold
 
@@ -27,18 +30,6 @@ class FaceTracker:
         return float(np.dot(v1, v2))
 
     def update(self, detections):
-        """
-        detections = [
-            {
-                "bbox": [x1,y1,x2,y2],
-                "identity": str,
-                "confidence": float,
-                "embedding": list,
-                "is_unknown": bool
-            }
-        ]
-        """
-
         now = time.time()
 
         # -------- Remove expired tracks --------
@@ -50,36 +41,77 @@ class FaceTracker:
         for tid in expired_tracks:
             del self.tracks[tid]
 
-        centers = [self._get_center(det["bbox"]) for det in detections]
-
         results = []
+        if len(detections) == 0:
+            for tid, track in self.tracks.items():
+                results.append({
+                    "track_id": tid,
+                    "bbox": track["bbox"],
+                    "identity": track["identity"],
+                    "confidence": track["confidence"],
+                    "embedding": track.get("embedding"),
+                    "is_unknown": track["is_unknown"]
+                })
+            return results
 
-        # -------- Match existing tracks --------
-        pairs = []
-        for tid, track in self.tracks.items():
+        centers = [self._get_center(det["bbox"]) for det in detections]
+        track_ids = list(self.tracks.keys())
+
+        # If no existing tracks, create all as new
+        if len(track_ids) == 0:
             for i, det in enumerate(detections):
-                dist = self._distance(track["center"], centers[i])
+                tid = self.next_track_id
+                self.next_track_id += 1
+                self.tracks[tid] = {
+                    "bbox": det["bbox"],
+                    "center": centers[i],
+                    "last_seen": now,
+                    "identity": det["identity"],
+                    "confidence": det["confidence"],
+                    "embedding": det["embedding"],
+                    "is_unknown": det["is_unknown"]
+                }
+                results.append({
+                    "track_id": tid,
+                    "bbox": det["bbox"],
+                    "identity": det["identity"],
+                    "confidence": det["confidence"],
+                    "embedding": det["embedding"],
+                    "is_unknown": det["is_unknown"]
+                })
+            return results
 
+        # -------- Match existing tracks (Hungarian Algorithm) --------
+        
+        # Cost matrix: rows=tracks, cols=detections
+        cost_matrix = np.full((len(track_ids), len(detections)), 1e6)
+
+        for r, tid in enumerate(track_ids):
+            track = self.tracks[tid]
+            for c, det in enumerate(detections):
+                dist = self._distance(track["center"], centers[c])
+                
                 embedding_sim = 0
                 if track.get("embedding") is not None and det.get("embedding") is not None:
                     embedding_sim = self._cosine_similarity(track["embedding"], det["embedding"])
 
-                # Matching rule
-                if (dist < self.track_distance_threshold) or (embedding_sim > self.embedding_threshold):
-                    score = embedding_sim - (dist * 0.001)
-                    pairs.append((score, tid, i))
+                # Spatial takes priority if close
+                if dist < self.track_distance_threshold:
+                    cost_matrix[r, c] = dist
+                elif embedding_sim > self.embedding_threshold:
+                    cost_matrix[r, c] = 500.0 - (embedding_sim * 100) # Arbitrary safe cost lower than 1e6
 
-        # Sort pairs by best score descending
-        pairs.sort(key=lambda x: x[0], reverse=True)
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
 
-        matched_tids = set()
         matched_dets = set()
 
-        for score, tid, idx in pairs:
-            if tid in matched_tids or idx in matched_dets:
+        for r, c in zip(row_ind, col_ind):
+            # If cost is unassigned (1e6), it's a mismatch
+            if cost_matrix[r, c] >= 1e5:
                 continue
 
-            det = detections[idx]
+            tid = track_ids[r]
+            det = detections[c]
             track = self.tracks[tid]
 
             # Identity upgrade (Unknown → Known)
@@ -88,30 +120,27 @@ class FaceTracker:
                 track["is_unknown"] = False
                 track["confidence"] = det["confidence"]
             elif not track["is_unknown"] and not det["is_unknown"]:
-                # Upgrade identity if new confidence is significantly higher
                 if det["confidence"] > track.get("confidence", 0) + 0.05:
                     track["identity"] = det["identity"]
                     track["confidence"] = det["confidence"]
             
-            # Update confidence if same identity and higher confidence
             if track["identity"] == det["identity"] and det["confidence"] > track.get("confidence", 0):
                 track["confidence"] = det["confidence"]
 
-            track["center"] = centers[idx]
+            track["bbox"] = det["bbox"]
+            track["center"] = centers[c]
             track["last_seen"] = now
 
-            # Always update to latest reliable embedding if available
             if det.get("embedding") is not None:
                 track["embedding"] = det["embedding"]
 
-            matched_tids.add(tid)
-            matched_dets.add(idx)
-
+            matched_dets.add(c)
+            
             results.append({
                 "track_id": tid,
                 "bbox": det["bbox"],
                 "identity": track["identity"],
-                "confidence": det["confidence"],
+                "confidence": track["confidence"],
                 "embedding": track["embedding"],
                 "is_unknown": track["is_unknown"]
             })
@@ -126,6 +155,7 @@ class FaceTracker:
             self.next_track_id += 1
 
             self.tracks[tid] = {
+                "bbox": det["bbox"],
                 "center": centers[idx],
                 "last_seen": now,
                 "identity": det["identity"],
@@ -143,4 +173,19 @@ class FaceTracker:
                 "is_unknown": det["is_unknown"]
             })
 
+        # Inject existing matched tracks into results that weren't visible this frame 
+        # but are still unexpired
+        active_tids = [r["track_id"] for r in results]
+        for tid, track in self.tracks.items():
+            if tid not in active_tids:
+                results.append({
+                    "track_id": tid,
+                    "bbox": track["bbox"],
+                    "identity": track["identity"],
+                    "confidence": track["confidence"],
+                    "embedding": track.get("embedding"),
+                    "is_unknown": track["is_unknown"]
+                })
+
         return results
+

@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from datetime import datetime
+import time
 
 from .database import (
     attendance_col,
@@ -23,17 +25,16 @@ def read_health():
 
 @api_router.get("/live-headcount")
 def get_live_headcount():
-    # Use real-time lifecycle registry instead of database
-    registry = camera_manager.lifecycle_engine.active_registry
-
     unique_knowns = set()
     unique_unknowns = set()
 
-    for data in registry.values():
-        if data.get("is_unknown", False):
-            unique_unknowns.add(data["identity"])
-        else:
-            unique_knowns.add(data["identity"])
+    with camera_manager.lifecycle_engine.registry_lock:
+        registry = camera_manager.lifecycle_engine.active_registry
+        for data in registry.values():
+            if data.get("is_unknown", False):
+                unique_unknowns.add(data["identity"])
+            else:
+                unique_knowns.add(data["identity"])
 
     return {
         "known_persons": len(unique_knowns),
@@ -43,17 +44,18 @@ def get_live_headcount():
 
 @api_router.get("/active-persons")
 def get_active_persons():
-    registry = camera_manager.lifecycle_engine.active_registry
-
     persons = []
 
-    for track_id, data in registry.items():
-        persons.append({
-            "track_id": track_id,
-            "identity": data["identity"],
-            "is_unknown": data["is_unknown"],
-            "last_seen": data["last_seen"]
-        })
+    with camera_manager.lifecycle_engine.registry_lock:
+        registry = camera_manager.lifecycle_engine.active_registry
+
+        for track_id, data in registry.items():
+            persons.append({
+                "track_id": track_id,
+                "identity": data["identity"],
+                "is_unknown": data["is_unknown"],
+                "last_seen": data["last_seen"]
+            })
 
     return persons
 
@@ -132,3 +134,89 @@ def promote_unknown(req: PromoteRequest):
 @api_router.get("/camera-status")
 def get_camera_status():
     return list(camera_status_col.find({}, {"_id": 0}))
+
+import io
+from fastapi.responses import StreamingResponse
+
+@api_router.get("/debug-frame")
+def get_debug_frame():
+    with camera_manager.frame_lock:
+        frame = camera_manager.processed_frames.get("cam_01")
+        if frame is None:
+            frame = camera_manager.latest_frames.get("cam_01")
+            
+    if frame is None:
+        return {"error": "no frame available"}
+        
+    import cv2
+    _, buffer = cv2.imencode('.jpg', frame)
+    return StreamingResponse(io.BytesIO(buffer), media_type="image/jpeg")
+
+import asyncio
+import cv2
+import numpy as np
+from aiortc import VideoStreamTrack, RTCPeerConnection, RTCSessionDescription
+from av import VideoFrame
+
+pcs = set()
+
+class CameraStreamTrack(VideoStreamTrack):
+    kind = "video"
+
+    def __init__(self, camera_id):
+        super().__init__()
+        self.camera_id = camera_id
+
+    async def recv(self):
+        pts, time_base = await self.next_timestamp()
+
+        # Grab latest frame
+        with camera_manager.frame_lock:
+            frame = camera_manager.processed_frames.get(self.camera_id)
+            if frame is None:
+                frame = camera_manager.latest_frames.get(self.camera_id)
+
+        if frame is None:
+            # Send a blank frame if camera not ready
+            frame = np.zeros((360, 640, 3), dtype=np.uint8)
+
+        # WebRTC strictly prefers RGB formats to prevent black rendering bugs in Chrome
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        video_frame = VideoFrame.from_ndarray(frame_rgb, format="rgb24")
+        video_frame.pts = pts
+        video_frame.time_base = time_base
+        
+        return video_frame
+
+class OfferRequest(BaseModel):
+    sdp: str
+    type: str
+    camera_id: str
+
+@api_router.post("/offer")
+async def offer(params: OfferRequest):
+    offer = RTCSessionDescription(sdp=params.sdp, type=params.type)
+
+    pc = RTCPeerConnection()
+    pcs.add(pc)
+
+    @pc.on("connectionstatechange")
+    async def on_connectionstatechange():
+        if pc.connectionState == "failed" or pc.connectionState == "closed":
+            pcs.discard(pc)
+
+    # Add the video track for the requested camera
+    video_track = CameraStreamTrack(camera_id=params.camera_id)
+    pc.addTrack(video_track)
+
+    await pc.setRemoteDescription(offer)
+    answer = await pc.createAnswer()
+    await pc.setLocalDescription(answer)
+
+    return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+
+@api_router.on_event("shutdown")
+async def on_shutdown():
+    # close all peer connections
+    coros = [pc.close() for pc in pcs]
+    await asyncio.gather(*coros)
