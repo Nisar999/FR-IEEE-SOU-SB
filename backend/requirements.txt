@@ -1,13 +1,28 @@
+# Core API Framework
 fastapi==0.104.0
 uvicorn==0.23.2
-pymongo==4.5.0
+python-multipart==0.0.9
+
+# Data Validation
 pydantic==2.4.2
+
+# Database
+pymongo==4.5.0
+
+# Face Recognition
 insightface==0.7.3
 onnxruntime==1.16.1
+
+# Image Processing
 opencv-python==4.8.1.78
-pyyaml==6.0.1
 numpy==1.26.1
+
+# Tracker
+scipy==1.11.3
+
+# WebRTC Streaming
 aiortc==1.6.0
 av==11.0.0
-scipy==1.11.3dantic==2.6.1
-python-multipart==0.0.9
+
+# Config parsing
+pyyaml==6.0.1
