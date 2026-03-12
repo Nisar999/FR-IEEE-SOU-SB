@@ -2,15 +2,10 @@ import time
 import math
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+from .settings import app_settings
 
 class FaceTracker:
-    def __init__(self, track_distance_threshold=120.0, track_expiry_seconds=5.0, embedding_threshold=0.60):
-        # Increased distance threshold to accommodate fast movement
-        self.track_distance_threshold = track_distance_threshold
-        # Decreased expiry heavily to prevent zombie tracks lingering after target moves quickly
-        self.track_expiry_seconds = track_expiry_seconds
-        self.embedding_threshold = embedding_threshold
-
+    def __init__(self):
         # track_id → track data
         self.tracks = {}
 
@@ -35,7 +30,7 @@ class FaceTracker:
         # -------- Remove expired tracks --------
         expired_tracks = [
             tid for tid, t in self.tracks.items()
-            if now - t["last_seen"] > self.track_expiry_seconds
+            if now - t["last_seen"] > app_settings.exit_threshold_seconds
         ]
 
         for tid in expired_tracks:
@@ -96,9 +91,9 @@ class FaceTracker:
                     embedding_sim = self._cosine_similarity(track["embedding"], det["embedding"])
 
                 # Spatial takes priority if close
-                if dist < self.track_distance_threshold:
+                if dist < app_settings.tracker_distance_threshold:
                     cost_matrix[r, c] = dist
-                elif embedding_sim > self.embedding_threshold:
+                elif embedding_sim > (1.0 - app_settings.unknown_threshold):
                     cost_matrix[r, c] = 500.0 - (embedding_sim * 100) # Arbitrary safe cost lower than 1e6
 
         row_ind, col_ind = linear_sum_assignment(cost_matrix)

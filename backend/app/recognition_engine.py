@@ -4,12 +4,12 @@ import numpy as np
 import logging
 from insightface.app import FaceAnalysis
 
+from .settings import app_settings
+
 class RecognitionEngine:
     def __init__(self,
-                 embeddings_path=r"./embeddings/embeddings.pkl",
-                 similarity_threshold=0.45):
+                 embeddings_path=r"./embeddings/embeddings.pkl"):
         self.embeddings_path = embeddings_path
-        self.similarity_threshold = similarity_threshold
         self.known_embeddings = {}
 
         self.load_embeddings()
@@ -93,7 +93,7 @@ class RecognitionEngine:
             identity = "Unknown"
             is_unknown = True
 
-            if highest_sim >= self.similarity_threshold:
+            if highest_sim >= app_settings.similarity_threshold:
                 identity = best_match
                 is_unknown = False
 

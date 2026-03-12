@@ -11,10 +11,10 @@ from .database import (
     close_attendance_record,
     save_unknown_identity
 )
+from .settings import app_settings
 
 class LifecycleEngine:
-    def __init__(self, exit_threshold_seconds=10.0, unknown_expiry_minutes=180.0):
-        self.exit_threshold_seconds = exit_threshold_seconds
+    def __init__(self, unknown_expiry_minutes=180.0):
         self.unknown_expiry_minutes = unknown_expiry_minutes
 
         # Thread-safety lock for registries
@@ -34,7 +34,7 @@ class LifecycleEngine:
             to_remove = []
 
             for track_id, data in self.active_registry.items():
-                if now - data["last_seen"] > self.exit_threshold_seconds:
+                if now - data["last_seen"] > app_settings.exit_threshold_seconds:
                     close_attendance_record(data["record_id"])
                     logging.info(f"EXIT registered for {data['identity']}")
                     to_remove.append(track_id)
@@ -152,7 +152,7 @@ class LifecycleEngine:
                 best_match = uid
 
         # reuse existing unknown if similar
-        if best_sim > 0.35:
+        if best_sim > app_settings.unknown_threshold:
             self.unknown_registry[best_match]["last_seen"] = now
             
             # Smooth embedding to adapt to different angles

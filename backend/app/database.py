@@ -18,6 +18,8 @@ persons_col = db["persons"]
 attendance_col = db["attendance_logs"]
 unknown_col = db["unknown_archive"]
 camera_status_col = db["camera_status"]
+cameras_col = db["cameras"]
+settings_col = db["settings"]
 
 def _retry_mongo(func, retries=3, delay=1):
     def wrapper(*args, **kwargs):
@@ -45,20 +47,25 @@ def create_attendance_record(name: str, camera_id: str, is_unknown: bool, confid
     now = datetime.utcnow()
     start_of_day = datetime(now.year, now.month, now.day)
     
-    # Check if a record for this person already exists today
-    existing = attendance_col.find_one({
-        "person_name": name,
-        "entry_time": {"$gte": start_of_day}
-    })
+    # Check if a record for this person already exists today (even if completed)
+    existing = attendance_col.find_one(
+        {
+            "person_name": name,
+            "entry_time": {"$gte": start_of_day}
+        },
+        sort=[("last_seen", -1)] # Get the most recent one
+    )
     
     if existing:
+        # Re-activate the existing record instead of creating a new one
         attendance_col.update_one(
             {"_id": existing["_id"]},
             {
                 "$set": {
                     "last_seen": now,
                     "status": "active",
-                    "camera_id": camera_id # update to latest camera seen on
+                    "exit_time": None, # Nullify exit time since they are back
+                    "camera_id": camera_id 
                 },
                 "$inc": {
                     "visit_count": 1,
@@ -69,7 +76,7 @@ def create_attendance_record(name: str, camera_id: str, is_unknown: bool, confid
         )
         return existing["_id"]
 
-    # If no existing record today, create a new one
+    # If absolutely no record exists today, create a new one
     record = {
         "person_name": name,
         "camera_id": camera_id,

@@ -4,7 +4,8 @@ import time
 import cv2
 import logging
 
-from .database import update_camera_status
+from .database import update_camera_status, cameras_col
+from .settings import app_settings
 from .recognition_engine import RecognitionEngine
 from .face_tracker import FaceTracker
 from .lifecycle_engine import LifecycleEngine
@@ -20,21 +21,16 @@ class CameraManager:
                 cls._instance._initialized = False
             return cls._instance
 
-    def __init__(self,
-                 config_path=r"./config/cameras.yaml",
-                 target_resolution=(640, 360),
-                 fps_sampling=1):
+    def __init__(self, target_resolution=(640, 360)):
         if self._initialized:
             return
         self._initialized = True
 
-        self.config_path = config_path
         self.target_resolution = target_resolution
-        self.fps_sampling = fps_sampling
-
-        self.threads = []
-        self.stop_event = threading.Event()
-
+        
+        # Threads mapped by camera_id
+        self.camera_threads = {}
+        
         # Engines
         self.recognition_engine = RecognitionEngine()
         self.lifecycle_engine = LifecycleEngine()
@@ -47,56 +43,76 @@ class CameraManager:
         self.processed_frames = {}
         self.frame_lock = threading.Lock()
 
-    def load_config(self):
-        try:
-            with open(self.config_path, "r") as f:
-                return yaml.safe_load(f)
-        except Exception as e:
-            logging.error(f"Failed to load camera config: {e}")
-            return {}
-
     def start_all(self):
-        cameras = self.load_config()
-
-        if not cameras:
-            logging.warning("No cameras configured.")
+        docs = list(cameras_col.find({}))
+        if not docs:
+            logging.warning("No cameras configured in database.")
             return
 
-        for cam_id, rtsp_url in cameras.items():
-            self.trackers[cam_id] = FaceTracker()
+        for cam in docs:
+            self.add_camera(cam["camera_id"], cam["camera_source"])
 
-            t_cam = threading.Thread(
-                target=self._camera_worker,
-                args=(cam_id, rtsp_url),
-                daemon=True
-            )
+    def add_camera(self, cam_id, source):
+        if cam_id in self.camera_threads:
+            return
             
-            t_proc = threading.Thread(
-                target=self._processing_worker,
-                args=(cam_id,),
-                daemon=True
-            )
+        self.trackers[cam_id] = FaceTracker()
+        
+        stop_evt = threading.Event()
 
-            self.threads.append(t_cam)
-            self.threads.append(t_proc)
+        t_cam = threading.Thread(
+            target=self._camera_worker,
+            args=(cam_id, source, stop_evt),
+            daemon=True
+        )
+        
+        t_proc = threading.Thread(
+            target=self._processing_worker,
+            args=(cam_id, stop_evt),
+            daemon=True
+        )
+        
+        self.camera_threads[cam_id] = {
+            "cam_thread": t_cam,
+            "proc_thread": t_proc,
+            "stop_evt": stop_evt
+        }
+
+        t_cam.start()
+        t_proc.start()
+        logging.info(f"Started workers for camera {cam_id}")
+
+    def remove_camera(self, cam_id):
+        if cam_id not in self.camera_threads:
+            return
             
-            t_cam.start()
-            t_proc.start()
-
-            logging.info(f"Started workers for camera {cam_id}")
+        meta = self.camera_threads[cam_id]
+        meta["stop_evt"].set()
+        
+        # wait gracefully
+        # meta["cam_thread"].join(timeout=1)
+        # meta["proc_thread"].join(timeout=1)
+        
+        del self.camera_threads[cam_id]
+        if cam_id in self.trackers:
+            del self.trackers[cam_id]
+        if cam_id in self.latest_frames:
+            del self.latest_frames[cam_id]
+        if cam_id in self.processed_frames:
+            del self.processed_frames[cam_id]
+            
+        logging.info(f"Stopped and removed workers for camera {cam_id}")
 
     def stop_all(self):
-        self.stop_event.set()
-
-        for t in self.threads:
-            t.join()
-
+        for cam_id in list(self.camera_threads.keys()):
+            self.remove_camera(cam_id)
         logging.info("All camera workers stopped.")
 
-    def _camera_worker(self, camera_id, rtsp_url):
+    def _camera_worker(self, camera_id, source, stop_evt):
         update_camera_status(camera_id, "connecting")
 
-        cap = cv2.VideoCapture(rtsp_url)
+        cv2_source = int(source) if str(source).isdigit() else source
+        cap = cv2.VideoCapture(cv2_source)
         # Reduce buffer size to ensure we get the latest frame
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
@@ -106,14 +122,15 @@ class CameraManager:
 
         update_camera_status(camera_id, "active")
 
-        while not self.stop_event.is_set():
+        while not stop_evt.is_set():
             ret, frame = cap.read()
 
             if not ret:
                 update_camera_status(camera_id, "error", "Stream disconnected. Reconnecting...")
                 cap.release()
-                time.sleep(5)
-                cap = cv2.VideoCapture(rtsp_url)
+                stop_evt.wait(5)
+                if stop_evt.is_set(): break
+                cap = cv2.VideoCapture(cv2_source)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
                 if cap.isOpened():
@@ -131,13 +148,13 @@ class CameraManager:
         cap.release()
         update_camera_status(camera_id, "offline")
 
-    def _processing_worker(self, camera_id):
+    def _processing_worker(self, camera_id, stop_evt):
         last_process_time = time.time()
         
-        while not self.stop_event.is_set():
+        while not stop_evt.is_set():
             current_time = time.time()
             
-            if current_time - last_process_time >= (1.0 / self.fps_sampling):
+            if current_time - last_process_time >= (1.0 / max(0.1, app_settings.fps_sampling)):
                 last_process_time = current_time
 
                 with self.frame_lock:
@@ -178,7 +195,7 @@ class CameraManager:
                                 x1, y1, x2, y2 = map(int, bbox)
                                 identity = face_data.get('identity', 'Unknown')
                                 confidence = face_data.get('confidence', 0)
-                                color = (0, 0, 255) if face_data.get('is_unknown', True) else (0, 255, 0)
+                                color = (0, 255, 255) if face_data.get('is_unknown', True) else (0, 255, 0)
                                 cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
                                 label = f"{identity} ({confidence:.2f})"
                                 cv2.putText(display_frame, label, (x1, max(y1 - 10, 0)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
