@@ -1,22 +1,23 @@
 # CCTV Face Recognition System
 
-Production-ready CCTV Face Recognition system running on CPU using Python, FastAPI, InsightFace, MongoDB, and a Vite React Dashboard.
+Production-ready CCTV Face Recognition system running on CPU using Python, FastAPI, InsightFace, WebRTC, MongoDB, and a modern Vite React Dashboard.
 
 ## Features
 
-- Multi-stream RTSP Camera Threading and Frame Downsampling (1 FPS target).
-- InsightFace (`buffalo_l`) arcface embedding extraction on CPU.
-- Tracker algorithm reducing recognition noise.
-- Lifecycle Engine monitoring Entry, Active, Exits, and Visits. 
-- Auto Unknown Identity detection based on a `0.4` threshold, keeping unpromoted identities for 180m.
-- Dashboard with Live Headcount, Camera Monitoring, Person History, Attendance Daily logs, and Unknown Identity Promotion tool.
-- Protected Routes using JWT/LocalStorage style simulation `/login`. Default credentials: `SOU` / `sahana@sou`.
+- **Real-Time Video Streaming**: Low-latency WebRTC streaming from the backend to the frontend dashboard.
+- **Advanced Face Recognition**: InsightFace (`buffalo_l`) arcface embedding extraction optimized for CPU.
+- **Multi-stream Support**: RTSP Camera Threading and Frame Downsampling.
+- **Intelligent Tracking**: Tracker algorithm to reduce recognition noise and stabilize identity detection.
+- **Lifecycle Engine**: Monitors Entry, Active status, Exits, and complete Visit durations.
+- **Unknown Identity Management**: Auto-detects unknown identities based on a `0.4` threshold, keeping unpromoted identities for 180m for manual review.
+- **Interactive Dashboard**: Modern UI built with React, Vite, Tailwind CSS, and Shadcn UI. Features include Live Headcount, Camera Monitoring, Person History, Attendance Daily logs, and an Unknown Identity Promotion tool.
+- **Authentication**: Protected Routes using JWT/LocalStorage style simulation. Default credentials: `SOU` / `sahana@sou`.
 
 ## Directory Structure
 
-- `backend/`: FastAPI Python implementation of the face recognition logic and HTTP APis.
+- `backend/`: FastAPI Python implementation of the face recognition logic, WebRTC streaming, and HTTP APIs.
 - `docker/`: Build recipes for `face-recognition-service` and `mongodb` clustering.
-- `frontend/`: The React Dashboard (using Vite) integrating everything via `/login` to backend APIs.
+- `frontend/`: The React Dashboard (using Vite + Tailwind) integrating everything via `/login` to backend APIs.
 
 ## Setup Requirements
 Ensure you have the following installed:
@@ -35,7 +36,7 @@ Open a terminal in the root folder:
 ```bash
 cd backend
 python -m venv venv
-# Windows: venv\\Scripts\\activate | Mac/Linux: source venv/bin/activate
+# Windows: venv\Scripts\activate | Mac/Linux: source venv/bin/activate
 pip install -r requirements.txt
 ```
 Make sure `backend/config/cameras.yaml` is updated with your target real or simulated RTSP URLs:
