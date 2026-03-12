@@ -62,7 +62,7 @@ export default function Dashboard() {
         }));
 
         const knowns = knownRes.data.map((p: any) => ({
-          name: p.name,
+          name: p.person_name || 'Unknown',
           timeRaw: timestamp(p.last_seen),
           time: p.last_seen ? formatDistanceToNow(new Date(p.last_seen + 'Z'), { addSuffix: true }) : 'Unknown',
           location: 'Live Feed',
@@ -180,7 +180,7 @@ export default function Dashboard() {
                   <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white font-bold ${
                     item.type === 'known' ? 'bg-green-500' : 'bg-amber-500'
                   }`}>
-                    {item.name.charAt(0)}
+                    {item.name ? item.name.charAt(0).toUpperCase() : '?'}
                   </div>
                   <div>
                     <p className="text-sm font-medium text-foreground">{item.name}</p>
